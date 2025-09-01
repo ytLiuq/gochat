@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -21,6 +20,7 @@ import (
 // 记录用户聊天key
 var saveKeyMutex sync.Mutex
 var saveKey []string
+var clientMap map[int64]*Node = make(map[int64]*Node, 0)
 
 type Message struct {
 	Model
@@ -48,7 +48,7 @@ type Node struct {
 }
 
 // 映射关系
-var clientMap map[int64]*Node = make(map[int64]*Node, 0)
+//var clientMap map[int64]*Node = make(map[int64]*Node, 0)
 
 // 读写锁
 var rwLocker sync.RWMutex
@@ -153,68 +153,6 @@ var upSendChan chan []byte = make(chan []byte, 1024)
 
 func brodMsg(data []byte) {
 	upSendChan <- data
-}
-
-func init() {
-	go UdpSendProc()
-	go UpdRecProc()
-}
-
-// UdpSendProc 完成upd数据发送
-func UdpSendProc() {
-	udpConn, err := net.DialUDP("udp", nil, &net.UDPAddr{
-		//192.168.31.147
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 3000,
-		Zone: "",
-	})
-	if err != nil {
-		zap.S().Info("拨号udp端口失败", err)
-		return
-	}
-
-	defer udpConn.Close()
-
-	for {
-		select {
-		case data := <-upSendChan:
-			_, err := udpConn.Write(data)
-			if err != nil {
-				zap.S().Info("写入udp消息失败", err)
-				return
-			}
-			fmt.Println("数据成功发送到udp服务端:", string(data))
-		}
-	}
-
-}
-
-// UpdRecProc 完成udp数据的接收
-func UpdRecProc() {
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 3000,
-	})
-	if err != nil {
-		zap.S().Info("监听udp端口失败", err)
-		return
-	}
-
-	defer udpConn.Close()
-
-	for {
-		var buf [1024]byte
-		n, err := udpConn.Read(buf[0:])
-		if err != nil {
-			zap.S().Info("读取udp数据失败", err)
-			return
-		}
-
-		fmt.Println("udp服务端接收udp数据", buf[0:n])
-
-		//处理发送逻辑
-		dispatch(buf[0:n])
-	}
 }
 
 func dispatch(data []byte) {

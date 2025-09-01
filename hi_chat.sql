@@ -52,7 +52,15 @@ INSERT INTO hi_chat.relations (id, created_at, updated_at, deleted_at, owner_id,
 INSERT INTO hi_chat.relations (id, created_at, updated_at, deleted_at, owner_id, target_id, type, `desc`) VALUES (4, '2023-10-30 16:39:33.825', '2023-10-30 16:39:33.825', null, 3, 1, 1, '');
 INSERT INTO hi_chat.relations (id, created_at, updated_at, deleted_at, owner_id, target_id, type, `desc`) VALUES (5, '2023-10-30 16:48:09.447', '2023-10-30 16:48:09.447', null, 1, 1, 2, '');
 
-
+CREATE TABLE messages_cold (
+    id VARCHAR(32) PRIMARY KEY,
+    conversation_id VARCHAR(64) INDEX,
+    sender_id VARCHAR(32),
+    content BLOB,
+    msg_type VARCHAR(16),
+    timestamp DATETIME(6),
+    INDEX idx_conv_time (conversation_id, timestamp)
+);
 
 create table messages
 (

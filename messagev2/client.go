@@ -33,16 +33,16 @@ type Message struct {
 	Timestamp time.Time // 或者 time.Time，看你存什么
 }
 
-func GetLocalGateway() *Gateway {
-	return LocalGateway
-}
-
 // ReadPump —— 读取消息
 func (c *Client) ReadPump() {
 	defer func() {
-		// 从当前网关移除
-		gateway := GetLocalGateway() // 获取当前网关实例
-		if gateway != nil {
+		gateway, ok := GetGatewayByID(c.Gateway)
+		if !ok {
+			zap.L().Warn("Gateway not found during disconnect",
+				zap.String("user_id", c.UserID),
+				zap.String("gateway_id", c.Gateway))
+			// 继续关闭连接
+		} else {
 			gateway.RemoveClient(c.UserID)
 		}
 		c.Conn.Close()
@@ -200,7 +200,7 @@ func sendToMember(userID string, message []byte) {
 	}
 
 	// 2. 检查是否在本网关
-	if localClient, ok := GetClient(userID); ok {
+	if localClient, ok := GetClientByUserID(userID); ok {
 		select {
 		case localClient.Send <- message:
 			zap.S().Debug("Group message delivered locally",
@@ -277,7 +277,7 @@ func SendMessage(from, to, content, ClientMsgID string) error {
 	}
 
 	// 4. 判断是否在本网关
-	if localClient, ok := GetClient(to); ok {
+	if localClient, ok := GetClientByUserID(to); ok {
 		select {
 		case localClient.Send <- value:
 			zap.S().Debug("Message delivered locally", zap.String("from", from), zap.String("to", to))

@@ -35,9 +35,23 @@ type Gateway struct {
 }
 
 var (
-	// 全局持有当前网关实例（用于 SendMessage 调用）
-	LocalGateway *Gateway
+	gateways   = make(map[string]*Gateway)
+	gatewaysMu sync.RWMutex
 )
+
+func RegisterGateway(g *Gateway) {
+	gatewaysMu.Lock()
+	defer gatewaysMu.Unlock()
+	gateways[g.ID] = g
+}
+
+// GetGatewayByID 根据 ID 获取网关实例
+func GetGatewayByID(gatewayID string) (*Gateway, bool) {
+	gatewaysMu.RLock()
+	defer gatewaysMu.RUnlock()
+	g, ok := gateways[gatewayID]
+	return g, ok
+}
 
 // NewGateway 创建新网关
 func NewGateway(id string, port int) *Gateway {
@@ -74,12 +88,21 @@ func (g *Gateway) RemoveClient(userID string) {
 	global.RedisDB.Del(ctx, "user_conn:"+userID)
 	zap.S().Info("User disconnected", zap.String("user", userID))
 }
-
-func GetClient(userID string) (*Client, bool) {
-	if LocalGateway == nil {
+func GetClientByUserID(userID string) (*Client, bool) {
+	// 1. 查 Redis：用户在哪个网关？
+	gatewayID, online, err := GetUserGateway(userID)
+	if !online || err != nil {
 		return nil, false
 	}
-	return LocalGateway.GetClient(userID)
+
+	// 2. 获取网关实例
+	gateway, ok := GetGatewayByID(gatewayID)
+	if !ok {
+		return nil, false
+	}
+
+	// 3. 在网关中查找 Client
+	return gateway.GetClient(userID)
 }
 
 // GetClient 获取本地客户端
@@ -111,7 +134,6 @@ func (g *Gateway) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Conn:    conn,
 		Send:    make(chan []byte, 10),
 	}
-
 	// 注册到本地
 	g.AddClient(client)
 
@@ -123,8 +145,9 @@ func (g *Gateway) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 // Start 启动网关服务（HTTP + Kafka 消费）
 func (g *Gateway) Start(ctx context.Context) {
 	// 设置 WebSocket 路由
-	LocalGateway = g
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	RegisterGateway(g)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		g.HandleWebSocket(w, r)
 	})
 
@@ -132,7 +155,7 @@ func (g *Gateway) Start(ctx context.Context) {
 	addr := fmt.Sprintf(":%d", g.Port)
 	go func() {
 		zap.L().Info("Gateway HTTP server starting", zap.String("addr", addr), zap.String("id", g.ID))
-		if err := http.ListenAndServe(addr, nil); err != nil {
+		if err := http.ListenAndServe(addr, mux); err != nil {
 			zap.L().Error("HTTP server error", zap.Error(err))
 		}
 	}()

@@ -34,7 +34,7 @@ func main() {
 	gateways := []*messagev2.Gateway{
 		messagev2.NewGateway("gateway-1", 8081),
 		messagev2.NewGateway("gateway-2", 8082),
-		messagev2.NewGateway("gateway-2", 8083),
+		messagev2.NewGateway("gateway-3", 8083),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -55,5 +55,7 @@ func main() {
 	}()
 
 	go messagesave.StartArchiveJob(5 * time.Minute)
+
+	select {}
 
 }

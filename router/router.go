@@ -29,7 +29,7 @@ func Router() *gin.Engine {
 		user.DELETE("/delete", middlewear.JWY(), service.DeleteUser)
 		user.POST("/updata", middlewear.JWY(), service.UpdataUser)
 		user.GET("/ws", middlewear.JWY(), service.SendMsg)
-		user.GET("/SendUserMsg", middlewear.JWY(), service.SendUserMsg)
+		//user.GET("/SendUserMsg", middlewear.JWY(), service.SendUserMsg)
 	}
 
 	//图片、语音模块

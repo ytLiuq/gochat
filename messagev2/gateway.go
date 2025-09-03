@@ -1,8 +1,11 @@
+// messagev2/gateway.go
+
 package messagev2
 
 import (
 	"HiChat/global"
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -12,121 +15,128 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // 生产环境应校验 Origin
+	CheckOrigin: func(r *http.Request) bool { return true }, // 开发允许跨域
 }
 
+// Client 代表一个用户 WebSocket 连接
 type Client struct {
-	GatewayID string
-	UserID    string
-	Conn      *websocket.Conn
-	Send      chan []byte // 待发送的消息队列
-	mutex     sync.Mutex
+	UserID  string
+	Gateway string
+	Conn    *websocket.Conn
+	Send    chan []byte
 }
 
-func NewClient(userID, gatewayID string, conn *websocket.Conn) *Client {
-	return &Client{
-		UserID:    userID,
-		GatewayID: gatewayID,
-		Conn:      conn,
-		Send:      make(chan []byte, 100), // 缓冲 channel 防止阻塞
+// Gateway 代表一个网关节点（可运行多个实例）
+type Gateway struct {
+	ID      string
+	Port    int
+	Clients map[string]*Client // userID -> Client
+	Mu      sync.RWMutex
+}
+
+var (
+	// 全局持有当前网关实例（用于 SendMessage 调用）
+	LocalGateway *Gateway
+)
+
+// NewGateway 创建新网关
+func NewGateway(id string, port int) *Gateway {
+	return &Gateway{
+		ID:      id,
+		Port:    port,
+		Clients: make(map[string]*Client),
 	}
 }
 
-var clientManager = struct {
-	clients map[string]*Client // userID -> Client
-	mutex   sync.RWMutex
-}{
-	clients: make(map[string]*Client),
+// AddClient 注册客户端
+func (g *Gateway) AddClient(client *Client) {
+	g.Mu.Lock()
+	g.Clients[client.UserID] = client
+	g.Mu.Unlock()
+
+	// 向 Redis 注册用户所在网关（用于路由）
+	ctx := context.Background()
+	err := global.RedisDB.Set(ctx, "user_conn:"+client.UserID, g.ID, 30*time.Second).Err()
+	if err != nil {
+		zap.S().Warn("Redis set failed", zap.String("user", client.UserID), zap.Error(err))
+	}
+	zap.S().Info("User connected", zap.String("user", client.UserID), zap.String("gateway", g.ID))
 }
 
-func AddClient(client *Client) {
-	clientManager.mutex.Lock()
-	defer clientManager.mutex.Unlock()
-	clientManager.clients[client.UserID] = client
-}
+// RemoveClient 注销客户端
+func (g *Gateway) RemoveClient(userID string) {
+	g.Mu.Lock()
+	delete(g.Clients, userID)
+	g.Mu.Unlock()
 
-func RemoveClient(userID string) {
-	clientManager.mutex.Lock()
-	defer clientManager.mutex.Unlock()
-	delete(clientManager.clients, userID)
+	// 从 Redis 删除
+	ctx := context.Background()
+	global.RedisDB.Del(ctx, "user_conn:"+userID)
+	zap.S().Info("User disconnected", zap.String("user", userID))
 }
 
 func GetClient(userID string) (*Client, bool) {
-	clientManager.mutex.RLock()
-	defer clientManager.mutex.RUnlock()
-	client, exists := clientManager.clients[userID]
-	return client, exists
-}
-
-func BroadcastToLocals(message []byte) {
-	clientManager.mutex.RLock()
-	defer clientManager.mutex.RUnlock()
-	for _, client := range clientManager.clients {
-		select {
-		case client.Send <- message:
-		default:
-			// Send channel 满了，可能是客户端太慢，考虑断开
-			RemoveClient(client.UserID)
-			client.Conn.Close()
-		}
+	if LocalGateway == nil {
+		return nil, false
 	}
+	return LocalGateway.GetClient(userID)
 }
 
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// 1. 鉴权：从 query 或 header 获取 token
-	userID := r.URL.Query().Get("userId")
+// GetClient 获取本地客户端
+func (g *Gateway) GetClient(userID string) (*Client, bool) {
+	g.Mu.RLock()
+	defer g.Mu.RUnlock()
+	c, ok := g.Clients[userID]
+	return c, ok
+}
 
-	// 2. 升级为 WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		zap.S().Info("Upgrade failed: %v", err)
+// HandleWebSocket 处理 WebSocket 连接（所有网关共用）
+func (g *Gateway) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		http.Error(w, "missing userId", http.StatusBadRequest)
 		return
 	}
 
-	client := NewClient(userID, "gateway-1:8080", conn)
-
-	// 3. 注册到本地管理器
-	AddClient(client)
-
-	// 4. 向 Redis 注册连接关系（带 TTL）
-	ctx := context.Background()
-	err = global.RedisDB.Set(ctx, "user_conn:"+userID, "gateway-1:8080", 30*time.Second).Err()
+	// 升级为 WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		zap.S().Info("Redis set failed: %v", err)
+		zap.S().Error("Upgrade failed", zap.Error(err))
+		return
 	}
 
-	// 5. 启动读写 goroutine
+	client := &Client{
+		UserID:  userID,
+		Gateway: g.ID,
+		Conn:    conn,
+		Send:    make(chan []byte, 10),
+	}
+
+	// 注册到本地
+	g.AddClient(client)
+
+	// 启动读写协程
 	go client.WritePump()
 	go client.ReadPump()
 }
 
-// func main() {
-//     // 初始化 Redis
-//     if err := redis.Init(); err != nil {
-//         log.Fatal("Redis init failed: ", err)
-//     }
+// Start 启动网关服务（HTTP + Kafka 消费）
+func (g *Gateway) Start(ctx context.Context) {
+	// 设置 WebSocket 路由
+	LocalGateway = g
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		g.HandleWebSocket(w, r)
+	})
 
-//     // 启动 Kafka 消费者（监听跨网关消息）
-//	   kafka.InitProducer([]string{"localhost:9092"})
-//     go kafka.StartConsumer()
+	// 启动 HTTP 服务
+	addr := fmt.Sprintf(":%d", g.Port)
+	go func() {
+		zap.L().Info("Gateway HTTP server starting", zap.String("addr", addr), zap.String("id", g.ID))
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			zap.L().Error("HTTP server error", zap.Error(err))
+		}
+	}()
 
-//     // HTTP 路由
-//     http.HandleFunc("/ws", handleWebSocket)
-//     port := os.Getenv("PORT")
-//     if port == "" {
-//         port = "8080"
-//     }
-
-//     go func() {
-//         log.Println("Gateway server started on :" + port)
-//         if err := http.ListenAndServe(":"+port, nil); err != nil {
-//             log.Fatal("Server failed: ", err)
-//         }
-//     }()
-
-//     // 优雅关闭
-//     c := make(chan os.Signal, 1)
-//     signal.Notify(c, os.Interrupt)
-//     <-c
-//     log.Println("Shutting down...")
-// }
+	// 启动 Kafka 消费者（所有网关共享 group，负载均衡）
+	go StartConsumer(ctx, g)
+}

@@ -12,7 +12,7 @@ const (
 	PublishKey = "websocket"
 )
 
-//Publish 发布消息到Redis
+// Publish 发布消息到Redis
 func Publish(ctx context.Context, channel string, msg string) error {
 	var err error
 	fmt.Println("Publish 。。。。", msg)
@@ -23,7 +23,7 @@ func Publish(ctx context.Context, channel string, msg string) error {
 	return err
 }
 
-//Subscribe 订阅Redis消息
+// Subscribe 订阅Redis消息
 func Subscribe(ctx context.Context, channel string) (string, error) {
 	//获取订阅
 	sub := global.RedisDB.Subscribe(ctx, channel)

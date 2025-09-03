@@ -19,7 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-//List 获取用户列表
+// List 获取用户列表
 // @Summary List 获取用户列表
 // @Description 用户列表
 // @Tags 测试
@@ -265,9 +265,9 @@ func DeleteUser(ctx *gin.Context) {
 	})
 }
 
-//防止跨域站点伪造请求,
-//升级程序指定用于将 HTTP 连接升级到 WebSocket 连接的参数。
-//同时调用升级程序的方法是安全的
+// 防止跨域站点伪造请求,
+// 升级程序指定用于将 HTTP 连接升级到 WebSocket 连接的参数。
+// 同时调用升级程序的方法是安全的
 var upGrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -298,7 +298,7 @@ func SendMsg(ctx *gin.Context) {
 	MsgHandler(ctx, ws)
 }
 
-//MsgHandler 向socket连接发送消息
+// MsgHandler 向socket连接发送消息
 func MsgHandler(ctx *gin.Context, ws *websocket.Conn) {
 	for {
 
@@ -333,10 +333,10 @@ func MsgHandler(ctx *gin.Context, ws *websocket.Conn) {
 	}
 }
 
-//SendUserMsg 发送消息
-func SendUserMsg(ctx *gin.Context) {
-	models.Chat(ctx.Writer, ctx.Request)
-}
+// SendUserMsg 发送消息
+// func SendUserMsg(ctx *gin.Context) {
+// 	messagev2.HandleWebSocket(ctx.Writer, ctx.Request)
+// }
 
 func ExitUser(ctx *gin.Context) {
 	id, err := strconv.Atoi(ctx.Query("id"))

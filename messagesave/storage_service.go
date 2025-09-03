@@ -11,25 +11,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// 假设你在项目中已经定义了这两个全局变量
-// var redisdb *redis.Client
-// var DB *gorm.DB
-
-// StorageService 使用全局 redisdb 和 DB，无需传参
-type StorageService struct {
-	// 无需字段，直接使用全局实例
-}
-
-func NewStorageService() *StorageService {
-	svc := &StorageService{}
-
-	// 启动归档协程
-	go svc.StartArchiveJob(5 * time.Minute)
-	return svc
-}
-
 // Save：只写 Redis（热存储），归档任务负责落库
-func (s *StorageService) Save(ctx context.Context, msg *Message) error {
+func Save(ctx context.Context, msg *Message) error {
 	// 直接使用全局 redisdb
 	if err := saveToRedis(ctx, msg); err != nil {
 		zap.S().Info("Redis 写入失败: %v", err)
@@ -75,15 +58,15 @@ func saveToRedis(ctx context.Context, msg *Message) error {
 }
 
 // StartArchiveJob 定时将旧消息从 Redis 归档到 MySQL
-func (s *StorageService) StartArchiveJob(interval time.Duration) {
+func StartArchiveJob(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	for range ticker.C {
-		s.archiveOldMessages()
+		archiveOldMessages()
 	}
 }
 
 // archiveOldMessages 执行归档逻辑
-func (s *StorageService) archiveOldMessages() {
+func archiveOldMessages() {
 	cutoff := time.Now().Add(-7 * 24 * time.Hour) // 7天前
 
 	// 使用 SCAN 避免阻塞（生产推荐）
@@ -98,7 +81,7 @@ func (s *StorageService) archiveOldMessages() {
 
 		for _, key := range keys {
 			convID := key[len("conv:msg:"):]
-			s.archiveConversation(convID, cutoff)
+			archiveConversation(convID, cutoff)
 		}
 
 		if cursor == 0 {
@@ -108,7 +91,7 @@ func (s *StorageService) archiveOldMessages() {
 }
 
 // archiveConversation 归档单个会话的消息
-func (s *StorageService) archiveConversation(convID string, cutoff time.Time) {
+func archiveConversation(convID string, cutoff time.Time) {
 	key := fmt.Sprintf("conv:msg:%s", convID)
 
 	// 查找过期消息
@@ -154,3 +137,17 @@ func (s *StorageService) archiveConversation(convID string, cutoff time.Time) {
 		global.RedisDB.Del(context.Background(), fmt.Sprintf("msg:%s", m.ID))
 	}
 }
+
+// service := messagesave.NewStorageService() // 无参数！
+
+// msg := &Message{
+//     ID:             "msg_001",
+//     ConversationID: "group_1",
+//     SenderID:       "user_1",
+//     Content:        "Hello",
+//     MsgType:        "text",
+//     Timestamp:      time.Now(),
+//     ClientMsgID:    "client_123",
+// }
+
+// service.Save(context.Background(), msg)

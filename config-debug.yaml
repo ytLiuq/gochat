@@ -6,6 +6,6 @@ mysql:
   user: 'root'
   password: 'BAILAN201'
 redis:
-  host: '81.68.251.185'
-  port: '6379'
+  host: '127.0.0.1'   
+  port: '6379'        
 

@@ -2,6 +2,7 @@ package messagev2
 
 import (
 	"HiChat/dao"
+	"HiChat/global"
 	"HiChat/messagesave"
 	"HiChat/models"
 	"context"
@@ -193,9 +194,13 @@ func sendToMember(userID string, message []byte) {
 	}
 
 	if !online {
-		// 用户离线，可选择保存离线消息（本期可暂不处理）
-		zap.S().Info("User is offline, skipping group message",
-			zap.String("user_id", userID))
+		err = saveOfflineMessage(userID, message)
+		if err != nil {
+			zap.S().Error("Failed to save offline message", zap.String("to", userID), zap.Error(err))
+			// 可以选择忽略或返回错误
+			return // 通常离线消息失败不应阻塞主流程
+		}
+		zap.S().Info("Message saved to offline queue", zap.String("to", userID))
 		return
 	}
 
@@ -271,9 +276,14 @@ func SendMessage(from, to, content, ClientMsgID string) error {
 	}
 
 	if !online {
-		// 用户离线，可调用离线消息服务（本期暂不实现）
-		zap.S().Info("User offline, skipping", zap.String("to", to))
-		return nil // 或保存离线消息
+		err = saveOfflineMessage(to, value)
+		if err != nil {
+			zap.S().Error("Failed to save offline message", zap.String("to", to), zap.String("msg_id", msg.MsgID), zap.Error(err))
+			// 可以选择忽略或返回错误
+			return nil // 通常离线消息失败不应阻塞主流程
+		}
+		zap.S().Info("Message saved to offline queue", zap.String("to", to), zap.String("msg_id", msg.MsgID))
+		return nil
 	}
 
 	// 4. 判断是否在本网关
@@ -298,6 +308,21 @@ func SendMessage(from, to, content, ClientMsgID string) error {
 	zap.S().Debug("Message routed via Kafka", zap.String("from", from), zap.String("to", to), zap.String("target_gateway", targetGateway))
 
 	return nil
+}
+
+func saveOfflineMessage(userID string, messageData []byte) error {
+	ctx := context.Background()
+	key := fmt.Sprintf("offline:messages:%s", userID)
+
+	// 设置过期时间（例如 7 天）
+	_, err := global.RedisDB.RPush(ctx, key, messageData).Result()
+	if err != nil {
+		return err
+	}
+
+	// 设置 key 过期时间（如果之前没有设置）
+	_, err = global.RedisDB.Expire(ctx, key, 7*24*time.Hour).Result()
+	return err
 }
 
 func GetConversationID(uid1, uid2 string) string {

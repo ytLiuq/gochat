@@ -35,9 +35,18 @@ func InitDB() {
 	global.DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: newLogger, //打印sql日志
 	})
+
 	if err != nil {
 		panic(err)
 	}
+
+	sqlDB, err := global.DB.DB() // 取出底层 *sql.DB
+	if err != nil {
+		log.Fatal("get sql.DB failed:", err)
+	}
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(time.Hour)
 }
 
 func InitRedis() {

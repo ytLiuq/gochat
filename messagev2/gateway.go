@@ -6,6 +6,7 @@ import (
 	"HiChat/global"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sync"
 	"time"
@@ -92,22 +93,23 @@ func (g *Gateway) RemoveClient(userID string) {
 	global.RedisDB.Del(ctx, "user_conn:"+userID)
 	zap.S().Info("User disconnected", zap.String("user", userID))
 }
-func GetClientByUserID(userID string) (*Client, bool) {
-	// 1. 查 Redis：用户在哪个网关？
-	gatewayID, online, err := GetUserGateway(userID)
-	if !online || err != nil {
-		return nil, false
-	}
 
-	// 2. 获取网关实例
-	gateway, ok := GetGatewayByID(gatewayID)
-	if !ok {
-		return nil, false
-	}
+// func GetClientByUserID(userID string) (*Client, bool) {
+// 	// 1. 查 Redis：用户在哪个网关？
+// 	gatewayID, online, err := GetUserGateway(userID)
+// 	if !online || err != nil {
+// 		return nil, false
+// 	}
 
-	// 3. 在网关中查找 Client
-	return gateway.GetClient(userID)
-}
+// 	// 2. 获取网关实例
+// 	gateway, ok := GetGatewayByID(gatewayID)
+// 	if !ok {
+// 		return nil, false
+// 	}
+
+// 	// 3. 在网关中查找 Client
+// 	return gateway.GetClient(userID)
+// }
 
 // GetClient 获取本地客户端
 func (g *Gateway) GetClient(userID string) (*Client, bool) {
@@ -148,13 +150,18 @@ func (g *Gateway) HandleWebSocket(c *gin.Context) {
 	go client.ReadPump()
 }
 
+// helper: 根据 gateway ID 计算 partition（确定性）
+func gatewayIDToPartition(gatewayID string, numPartitions int) int {
+	h := fnv.New32a()
+	h.Write([]byte(gatewayID))
+	return int(h.Sum32()) % numPartitions
+}
+
 // Start 启动网关服务（HTTP + Kafka 消费）
 func (g *Gateway) Start(ctx context.Context) {
-	// 创建独立的 Gin 引擎
 	RegisterGateway(g)
 	r := gin.New()
 
-	// 中间件：日志和恢复
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
 	r.Use(func(c *gin.Context) {
@@ -162,7 +169,6 @@ func (g *Gateway) Start(ctx context.Context) {
 		c.Next()
 	})
 
-	// 注册 WebSocket 路由
 	r.GET("/ws", g.HandleWebSocket)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
@@ -172,7 +178,6 @@ func (g *Gateway) Start(ctx context.Context) {
 		})
 	})
 
-	// 启动 HTTP 服务
 	addr := fmt.Sprintf(":%d", g.Port)
 	go func() {
 		zap.L().Info("Gateway HTTP server starting",
@@ -183,8 +188,28 @@ func (g *Gateway) Start(ctx context.Context) {
 		}
 	}()
 
-	// 启动 Kafka 消费者（所有网关共享 group，负载均衡）
-	go StartConsumer(ctx, g)
+	// 启动 Kafka 消费者：每个网关消费一个固定 partition
+	const totalPartitions = 3 // 必须与 Kafka topic 的 partition 数一致
+	var partition int
+
+	// 可选：硬编码映射（便于调试）
+	partitionMap := map[string]int{
+		"gateway-1": 0,
+		"gateway-2": 1,
+		"gateway-3": 2,
+	}
+	if p, ok := partitionMap[g.ID]; ok {
+		partition = p
+	} else {
+		// fallback: hash 方式（适用于动态网关 ID）
+		partition = gatewayIDToPartition(g.ID, totalPartitions)
+	}
+
+	zap.L().Info("Assigning Kafka partition to gateway",
+		zap.String("gateway", g.ID),
+		zap.Int("partition", partition))
+
+	go g.StartConsumerForPartition(ctx)
 }
 
 func DeliverOfflineMessages(userID string, client *Client) {

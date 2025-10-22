@@ -16,7 +16,7 @@ require (
 	go.uber.org/zap v1.24.0
 	gopkg.in/fatih/set.v0 v0.2.1
 	gorm.io/driver/mysql v1.6.0
-	gorm.io/gorm v1.30.1
+	gorm.io/gorm v1.31.0
 )
 
 require (

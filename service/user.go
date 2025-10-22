@@ -144,11 +144,22 @@ func NewUser(ctx *gin.Context) {
 	user.LoginTime = &t
 	user.LoginOutTime = &t
 	user.HeartBeatTime = &t
-	dao.CreateUser(user)
+
+	createdUser, err := dao.CreateUser(user)
+	if err != nil {
+		ctx.JSON(200, gin.H{
+			"code":    -1,
+			"message": "创建用户失败",
+			"data":    user,
+		})
+		return
+	}
+
+	// ✅ 将填充了 ID 的 user 用于返回
 	ctx.JSON(200, gin.H{
-		"code":    0, //  0成功   -1失败
+		"code":    0,
 		"message": "新增用户成功！",
-		"data":    user,
+		"data":    *createdUser, // ← 这个 user.ID 已正确填充
 	})
 }
 

@@ -20,8 +20,8 @@ import (
 
 const (
 	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
+	pongWait       = 30 * time.Second    // 从 60s 改为 30s
+	pingPeriod     = (pongWait * 9) / 10 // = 27s
 	maxMessageSize = 512
 )
 
@@ -51,8 +51,18 @@ func (c *Client) ReadPump() {
 
 	c.Conn.SetReadLimit(512)
 	c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	c.Conn.SetPongHandler(func(string) error {
-		c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.Conn.SetPongHandler(func(appData string) error {
+		// 1. 更新读超时（原有逻辑）
+		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+
+		// 2. 刷新 Redis 中的在线状态 TTL（新增逻辑）
+		ctx := context.Background()
+		key := "user_conn:" + c.UserID
+		if err := global.RedisDB.Expire(ctx, key, ConnTTL).Err(); err != nil {
+			zap.S().Warn("Failed to refresh user online TTL in Redis",
+				zap.String("user_id", c.UserID),
+				zap.Error(err))
+		}
 		return nil
 	})
 
@@ -113,11 +123,17 @@ func (c *Client) handleMessage(message []byte) {
 		return
 	}
 
+	gateway, ok := GetGatewayByID(c.Gateway)
+	if !ok {
+		zap.S().Error("Gateway not found for client", zap.String("gateway", c.Gateway))
+		return
+	}
+
 	switch msg.Chattype {
 	case "group":
-		SendGroupMessage(c.UserID, msg.To, msg.Content, msg.ClientMsgID)
+		gateway.SendGroupMessage(c.UserID, msg.To, msg.Content, msg.ClientMsgID)
 	case "private", "":
-		SendMessage(c.UserID, msg.To, msg.Content, msg.ClientMsgID)
+		gateway.SendMessage(c.UserID, msg.To, msg.Content, msg.ClientMsgID)
 	default:
 		zap.S().Warn("Unsupported chat type", zap.String("type", msg.Chattype))
 	}
@@ -125,7 +141,7 @@ func (c *Client) handleMessage(message []byte) {
 
 const KafkaTopic = "im.msg.route"
 
-func SendGroupMessage(from, groupID, content, clientMsgID string) error {
+func (g *Gateway) SendGroupMessage(from, groupID, content, clientMsgID string) error {
 	// 1. 校验权限
 	inGroup, err := dao.IsUserInGroup(groupID, from)
 	if err != nil {
@@ -176,14 +192,14 @@ func SendGroupMessage(from, groupID, content, clientMsgID string) error {
 			continue
 		}
 		// 发送给 memberID（走本地 or Kafka）
-		sendToMember(idstring, value)
+		g.sendToMember(idstring, value)
 	}
 
 	return nil
 }
 
-// sendToMember 将群消息发送给指定成员
-func sendToMember(userID string, message []byte) {
+// sendToMember 将消息发送给指定用户（群聊或私聊复用）
+func (g *Gateway) sendToMember(userID string, message []byte) {
 	// 1. 查询用户所在网关，判断是否在线
 	targetGateway, online, err := GetUserGateway(userID)
 	if err != nil {
@@ -194,48 +210,58 @@ func sendToMember(userID string, message []byte) {
 	}
 
 	if !online {
-		err = saveOfflineMessage(userID, message)
-		if err != nil {
-			zap.S().Error("Failed to save offline message", zap.String("to", userID), zap.Error(err))
-			// 可以选择忽略或返回错误
-			return // 通常离线消息失败不应阻塞主流程
-		}
-		zap.S().Info("Message saved to offline queue", zap.String("to", userID))
-		return
-	}
-
-	// 2. 检查是否在本网关
-	if localClient, ok := GetClientByUserID(userID); ok {
-		select {
-		case localClient.Send <- message:
-			zap.S().Debug("Group message delivered locally",
-				zap.String("user_id", userID))
-		default:
-			// Send channel 满载，客户端可能卡顿或未及时消费
-			zap.S().Warn("Client send buffer full, dropping group message",
-				zap.String("user_id", userID))
-			// 可考虑关闭连接，或转为离线推送
+		// 用户离线，保存到其离线队列（以 userID 为 key）
+		if err := saveOfflineMessage(userID, message); err != nil {
+			zap.S().Error("Failed to save offline message",
+				zap.String("to", userID),
+				zap.Error(err))
+			// 不阻塞主流程
+		} else {
+			zap.S().Info("Message saved to offline queue",
+				zap.String("to", userID))
 		}
 		return
 	}
 
-	// 3. 不在本网关，通过 Kafka 发送到目标网关
-	err = ProduceMessage(KafkaTopic, userID, message)
-	if err != nil {
-		zap.S().Error("Failed to route group message via Kafka",
+	// 2. 如果目标用户在本网关，尝试本地投递
+	if targetGateway == g.ID {
+		if client, ok := g.GetClient(userID); ok {
+			select {
+			case client.Send <- message:
+				zap.S().Debug("Message delivered locally",
+					zap.String("user_id", userID),
+					zap.String("gateway", g.ID))
+			default:
+				zap.S().Warn("Client send buffer full, dropping message",
+					zap.String("user_id", userID))
+				// 可选：转为离线？但通常说明客户端异常，可记录或断开
+			}
+		} else {
+			// Redis 认为在线，但本地没找到：状态不一致（可能刚断开）
+			zap.S().Warn("User marked online in Redis but not found in gateway",
+				zap.String("user_id", userID),
+				zap.String("gateway", g.ID))
+			// 可选：清理 Redis？或忽略（下次心跳会过期）
+		}
+		return
+	}
+
+	// 3. 目标用户在其他网关，通过 Kafka 路由
+	if err := ProduceMessage(targetGateway, message); err != nil {
+		zap.S().Error("Failed to route message via Kafka",
 			zap.String("user_id", userID),
 			zap.String("target_gateway", targetGateway),
 			zap.Error(err))
 		return
 	}
 
-	zap.S().Debug("Group message routed via Kafka",
+	zap.S().Debug("Message routed via Kafka",
 		zap.String("user_id", userID),
 		zap.String("target_gateway", targetGateway))
 }
 
 // SendMessage 发送消息主逻辑
-func SendMessage(from, to, content, ClientMsgID string) error {
+func (g *Gateway) SendMessage(from, to, content, clientMsgID string) error {
 	// 1. 构造消息体
 	msg := Message{
 		MsgID:     generateMsgID(), // 可用雪花算法生成唯一 ID
@@ -259,7 +285,7 @@ func SendMessage(from, to, content, ClientMsgID string) error {
 		Content:        []byte(content), // 或封装更复杂的结构
 		MsgType:        "text",          // 可扩展
 		Timestamp:      msg.Timestamp,
-		ClientMsgID:    ClientMsgID, // 如果客户端传了去重ID，可从 handleMessage 解析传入
+		ClientMsgID:    clientMsgID, // 如果客户端传了去重ID，可从 handleMessage 解析传入
 	})
 	if err != nil {
 		zap.S().Error("Failed to save message", zap.String("msg_id", msg.MsgID), zap.Error(err))
@@ -269,7 +295,7 @@ func SendMessage(from, to, content, ClientMsgID string) error {
 	}
 
 	// 3. 查询目标用户所在网关
-	targetGateway, online, err := GetUserGateway(to)
+	targetGatewayID, online, err := GetUserGateway(to)
 	if err != nil {
 		zap.S().Error("Redis query failed", zap.String("to", to), zap.Error(err))
 		return err
@@ -287,25 +313,27 @@ func SendMessage(from, to, content, ClientMsgID string) error {
 	}
 
 	// 4. 判断是否在本网关
-	if localClient, ok := GetClientByUserID(to); ok {
-		select {
-		case localClient.Send <- value:
-			zap.S().Debug("Message delivered locally", zap.String("from", from), zap.String("to", to))
-		default:
-			// Send channel 满了，客户端可能卡顿
-			zap.S().Warn("Client send buffer full, message dropped", zap.String("user", to))
-			// 可考虑关闭连接或转离线
+	if targetGatewayID == g.ID {
+		if client, ok := g.GetClient(to); ok {
+			select {
+			case client.Send <- value:
+				zap.S().Debug("Delivered locally", zap.String("to", to))
+			default:
+				zap.S().Warn("Send buffer full", zap.String("to", to))
+			}
+			return nil
 		}
-		return nil
+		// 如果 Redis 说在本网关，但实际没找到，可能是状态不一致
+		zap.S().Warn("User claimed online in this gateway but not found", zap.String("user", to))
 	}
 
 	// 🚀 发送到 Kafka，跨网关路由
-	err = ProduceMessage(KafkaTopic, to, value)
+	err = ProduceMessage(targetGatewayID, value)
 	if err != nil {
 		zap.S().Error("Kafka produce failed", zap.String("to", to), zap.Error(err))
 		return err
 	}
-	zap.S().Debug("Message routed via Kafka", zap.String("from", from), zap.String("to", to), zap.String("target_gateway", targetGateway))
+	zap.S().Debug("Message routed via Kafka", zap.String("from", from), zap.String("to", to))
 
 	return nil
 }

@@ -22,7 +22,7 @@ func GetUserList() ([]*models.UserBasic, error) {
 
 //查询用户:根据昵称，根据电话，根据邮件
 
-//FindUserByNameAndPwd 昵称和密码查询
+// FindUserByNameAndPwd 昵称和密码查询
 func FindUserByNameAndPwd(name string, password string) (*models.UserBasic, error) {
 	user := models.UserBasic{}
 	if tx := global.DB.Where("name = ? and pass_word=?", name, password).First(&user); tx.RowsAffected == 0 {
@@ -77,7 +77,7 @@ func FindUserID(ID uint) (*models.UserBasic, error) {
 	return &user, nil
 }
 
-//CreateUser 新建用户
+// CreateUser 新建用户
 func CreateUser(user models.UserBasic) (*models.UserBasic, error) {
 	tx := global.DB.Create(&user)
 	if tx.RowsAffected == 0 {
